@@ -12,7 +12,8 @@ import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.sources.v2.DataSourceOptions
 import org.apache.spark.sql.sources.v2.writer.{DataSourceWriter, DataWriter, DataWriterFactory, WriterCommitMessage}
-import org.apache.spark.sql.types.{StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
+import org.apache.spark.unsafe.types.UTF8String
 
 class XMLSourceWriter(schema: StructType, mode: SaveMode, options: DataSourceOptions) extends DataSourceWriter {
 
@@ -46,7 +47,7 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
   val xmlWriter  = createXMLWriter()
 
   override def write(record: InternalRow): Unit = {
-    writeComplexElement(configuration.ELEMENT_NAME, record, recordSchema)
+    writeComplexElement(configuration.recordElementName, record, recordSchema)
   }
 
   def writeComplexElement(elementName : String, record : InternalRow, schema : StructType): Unit = {
@@ -58,13 +59,14 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
       val field = schema.fields.apply(index)
       if (!record.isNullAt(index)) {
         field.dataType match {
-          case structType: StructType => {
-            childElements += (field -> record.getStruct(index, structType.size))
+          case structType: StructType => childElements += (field -> record.getStruct(index, structType.size))
+          case arrayType: ArrayType => {
+            childElements += (field -> record.getArray(index).toSeq(arrayType.elementType))
           }
           case StringType => {
-            if (configuration.TEXT_VALUE.equals(field.name)) {
+            if (configuration.textNodeName.equals(field.name)) {
               textValue = record.getString(index)
-            } else if (field.name.startsWith(configuration.ATTRIBUTE_PREFIX)) {
+            } else if (field.name.startsWith(configuration.attributeNodePrefix)) {
               attributes.add(eventFactory.createAttribute(configuration.getAttributeNameWithoutPrefix(field.name), record.getString(index)))
             } else {
               childElements += (field -> record.getString(index))
@@ -73,23 +75,38 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
         }
       }
     }
-    xmlWriter.add(eventFactory.createStartElement(configuration.SCHEMA_PREFIX, "", elementName, attributes.iterator(), namespaces.iterator()))
-    if (!textValue.isEmpty) xmlWriter.add(eventFactory.createCharacters(textValue))
-    else {
-      for ((childElementType, childElement) <- childElements) {
-        childElementType.dataType match {
-          case structType: StructType => writeComplexElement(childElementType.name, childElement.asInstanceOf[InternalRow], structType)
-          case StringType => writeSimpleElement(childElementType.name, childElement.asInstanceOf[String])
+    xmlWriter.add(eventFactory.createStartElement(configuration.schemaPrefix, "", elementName, attributes.iterator(), namespaces.iterator()))
+    if (!textValue.isEmpty) writeTextNode(textValue) else writeChildElements(childElements)
+    xmlWriter.add(eventFactory.createEndElement(configuration.schemaPrefix, "", elementName))
+  }
+
+  def writeSimpleElement(elementName : String, elementText : String): Unit = {
+    xmlWriter.add(eventFactory.createStartElement(configuration.schemaPrefix, "", elementName))
+    writeTextNode(elementText)
+    xmlWriter.add(eventFactory.createEndElement(configuration.schemaPrefix, "", elementName))
+  }
+
+  def writeChildElements(childElements: Map[StructField, AnyRef]): Unit = {
+    for ((childElementType, childElement) <- childElements) {
+      childElementType.dataType match {
+        case structType: StructType => writeComplexElement(childElementType.name, childElement.asInstanceOf[InternalRow], structType)
+        case StringType => writeSimpleElement(childElementType.name, childElement.asInstanceOf[String])
+        case arrayType: ArrayType => {
+          arrayType.elementType match {
+            case structType: StructType => childElement.asInstanceOf[Seq[InternalRow]].foreach(seqChildRow => {
+              writeComplexElement(childElementType.name, seqChildRow, structType)
+            })
+            case StringType => childElement.asInstanceOf[Seq[UTF8String]].foreach(seqChildRow => {
+              writeSimpleElement(childElementType.name, seqChildRow.toString)
+            })
+          }
         }
       }
     }
-    xmlWriter.add(eventFactory.createEndElement(configuration.SCHEMA_PREFIX, "", elementName))
   }
 
-  def writeSimpleElement(elementName : String, elementValue : String): Unit = {
-    xmlWriter.add(eventFactory.createStartElement(configuration.SCHEMA_PREFIX, "", elementName))
-    xmlWriter.add(eventFactory.createCharacters(elementValue))
-    xmlWriter.add(eventFactory.createEndElement(configuration.SCHEMA_PREFIX, "", elementName))
+  def writeTextNode(textValue : String) : Unit = {
+    xmlWriter.add(eventFactory.createCharacters(textValue))
   }
 
   override def commit(): WriterCommitMessage = {
@@ -113,9 +130,8 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
   }
 
   def createFileStream() : OutputStream = {
-    val pathString = configuration.PATH
-    val path = new Path(pathString).getParent
-    val fileSystem = path.getFileSystem(new Configuration)
+    val path = new Path(configuration.path).getParent()
+    val fileSystem = path.getFileSystem(new Configuration())
     fileSystem.create(new Path(path.toString + "/part-" + partitionId))
   }
 }

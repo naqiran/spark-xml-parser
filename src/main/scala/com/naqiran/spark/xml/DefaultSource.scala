@@ -15,7 +15,7 @@ private[xml] class DefaultSource extends DataSourceRegister
   with WriteSupport
   with Logging {
 
-  override def shortName(): String = "com.naqiran.spark.xml"
+  override def shortName(): String = XMLConfiguration.XmlFormat
 
   override def createReader(options: DataSourceOptions) : DataSourceReader = {
     new XMLFileReader(options)
