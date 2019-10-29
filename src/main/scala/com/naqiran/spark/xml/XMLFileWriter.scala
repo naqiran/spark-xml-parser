@@ -7,6 +7,7 @@ import javax.xml.stream.events.{Attribute, Namespace}
 import javax.xml.stream.{XMLEventFactory, XMLEventWriter, XMLOutputFactory}
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.io.IOUtils
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.InternalRow
@@ -15,7 +16,8 @@ import org.apache.spark.sql.sources.v2.writer.{DataSourceWriter, DataWriter, Dat
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 
-class XMLSourceWriter(schema: StructType, mode: SaveMode, options: DataSourceOptions) extends DataSourceWriter {
+
+private[xml] class XMLSourceWriter(schema: StructType, mode: SaveMode, options: DataSourceOptions) extends DataSourceWriter {
 
   val config = new XMLConfiguration(options.asMap())
 
@@ -24,7 +26,24 @@ class XMLSourceWriter(schema: StructType, mode: SaveMode, options: DataSourceOpt
   }
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
-
+    val partitionFolder = new Path(XMLUtils.getPartitionFolder(config.pathString))
+    val fileSystem = partitionFolder.getFileSystem(new Configuration())
+    val fileStream = fileSystem.create(new Path(config.pathString))
+    try {
+      val eventFactory = XMLEventFactory.newInstance()
+      fileStream.writeBytes(eventFactory.createStartDocument().toString)
+      fileStream.writeBytes(eventFactory.createStartElement(config.schemaPrefix, "", config.rootElementName).toString)
+      if (fileSystem.isDirectory(partitionFolder)) {
+        val files = fileSystem.listStatus(partitionFolder)
+        for (file <- files) {
+          val partitionInputStream = fileSystem.open(file.getPath)
+          IOUtils.copyBytes(partitionInputStream, fileStream, new Configuration(), false)
+        }
+      }
+      fileStream.writeBytes(eventFactory.createEndElement(config.schemaPrefix, "", config.rootElementName).toString)
+      fileSystem.deleteOnExit(partitionFolder)
+    }
+    IOUtils.closeStream(fileStream)
   }
 
   override def abort(messages: Array[WriterCommitMessage]): Unit = {
@@ -32,7 +51,7 @@ class XMLSourceWriter(schema: StructType, mode: SaveMode, options: DataSourceOpt
   }
 }
 
-class XMLWriterFactory(schema : StructType, options : XMLConfiguration) extends DataWriterFactory[InternalRow] with Serializable {
+private[xml] class XMLWriterFactory(schema : StructType, options : XMLConfiguration) extends DataWriterFactory[InternalRow] with Serializable {
   override def createDataWriter(partitionId: Int, taskId: Long, epochId: Long): DataWriter[InternalRow] = {
     new XMLFileWriter(partitionId, schema, options)
   }
@@ -60,9 +79,7 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
       if (!record.isNullAt(index)) {
         field.dataType match {
           case structType: StructType => childElements += (field -> record.getStruct(index, structType.size))
-          case arrayType: ArrayType => {
-            childElements += (field -> record.getArray(index).toSeq(arrayType.elementType))
-          }
+          case arrayType: ArrayType => childElements += (field -> record.getArray(index).toSeq(arrayType.elementType))
           case StringType => {
             if (configuration.textNodeName.equals(field.name)) {
               textValue = record.getString(index)
@@ -93,12 +110,10 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
         case StringType => writeSimpleElement(childElementType.name, childElement.asInstanceOf[String])
         case arrayType: ArrayType => {
           arrayType.elementType match {
-            case structType: StructType => childElement.asInstanceOf[Seq[InternalRow]].foreach(seqChildRow => {
-              writeComplexElement(childElementType.name, seqChildRow, structType)
-            })
-            case StringType => childElement.asInstanceOf[Seq[UTF8String]].foreach(seqChildRow => {
-              writeSimpleElement(childElementType.name, seqChildRow.toString)
-            })
+            case structType: StructType => childElement.asInstanceOf[Seq[InternalRow]]
+              .foreach(seqChildRow => writeComplexElement(childElementType.name, seqChildRow, structType))
+            case StringType => childElement.asInstanceOf[Seq[UTF8String]]
+              .foreach(seqChildRow => writeSimpleElement(childElementType.name, seqChildRow.toString))
           }
         }
       }
@@ -111,10 +126,8 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
 
   override def commit(): WriterCommitMessage = {
     try {
-      xmlWriter.flush()
       xmlWriter.close()
-      fileStream.flush()
-      fileStream.close()
+      IOUtils.closeStream(fileStream)
     } catch {
       case ex: Exception => log.error("Error closing the streams for partitions: {} - {}", partitionId, ex.getMessage)
     }
@@ -130,12 +143,13 @@ class XMLFileWriter(partitionId : Int, recordSchema : StructType, configuration 
   }
 
   def createFileStream() : OutputStream = {
-    val path = new Path(configuration.path).getParent()
+    val fileName = XMLUtils.getPartitionFileName(partitionId, configuration.pathString)
+    val path = new Path(fileName)
     val fileSystem = path.getFileSystem(new Configuration())
-    fileSystem.create(new Path(path.toString + "/part-" + partitionId))
+    fileSystem.create(path)
   }
 }
 
-class XMLWriterCommitMessage(message : String) extends WriterCommitMessage with Logging {
+private[xml] class XMLWriterCommitMessage(message : String) extends WriterCommitMessage with Logging {
 
 }

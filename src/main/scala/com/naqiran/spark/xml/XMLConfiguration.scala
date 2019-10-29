@@ -3,14 +3,16 @@ package com.naqiran.spark.xml
 import java.util
 import java.util.Map
 
+import org.apache.hadoop.fs.Path
+
 private[xml] class XMLConfiguration(@transient private val configuration: Map[String, String]) extends Serializable {
   def this() = this(new util.LinkedHashMap[String,String]())
   val schemaPrefix = configuration.getOrDefault(XMLConfiguration.XmlSchemaPrefix, XMLConfiguration.DefaultSchemaPrefix)
   val attributeNodePrefix = configuration.getOrDefault(XMLConfiguration.XmlAttributeNodePrefix, XMLConfiguration.DefaultAttributeNodePrefix)
   val textNodeName = configuration.getOrDefault(XMLConfiguration.XmlTextNodeName, XMLConfiguration.DefaultTextNodeName)
   val recordElementName = configuration.getOrDefault(XMLConfiguration.XmlRecordElementName, XMLConfiguration.DefaultRecordElementName)
-  val path = configuration.getOrDefault("path", "")
-
+  val rootElementName = configuration.getOrDefault(XMLConfiguration.XmlRootElementName, XMLConfiguration.DefaultRootElementName)
+  val pathString = configuration.getOrDefault("path", "")
   def getAttributeNameWithoutPrefix(attributeName: String): String = {
     attributeName.replace(attributeNodePrefix, "")
   }
@@ -33,7 +35,7 @@ object XMLConfiguration {
   val XmlRootElementName = "xml.default.root.element.name"
   val DefaultRootElementName = "default_root_element"
 
-  def getAttributeName(attributeName: String): String = {
+  def defaultAttributeName(attributeName: String): String = {
     DefaultAttributeNodePrefix + attributeName
   }
 }

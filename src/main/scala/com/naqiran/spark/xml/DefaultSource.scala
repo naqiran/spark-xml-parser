@@ -17,8 +17,10 @@ private[xml] class DefaultSource extends DataSourceRegister
 
   override def shortName(): String = XMLConfiguration.XmlFormat
 
-  override def createReader(options: DataSourceOptions) : DataSourceReader = {
-    new XMLFileReader(options)
+  override def createReader(options: DataSourceOptions) : DataSourceReader = throw new UnsupportedOperationException(shortName() + " does not support user specified schema")
+
+  override def createReader(schema: StructType, options: DataSourceOptions) : DataSourceReader = {
+    new XMLFileReader(schema, options)
   }
 
   override def createWriter(writeUUID: String, schema: StructType, mode: SaveMode, options: DataSourceOptions): Optional[DataSourceWriter] = {
