@@ -1,2 +1,2 @@
-# naqiran-spark-xml
-Spark XML Writer
+# Spark XML
+XML Plugin for Spark 

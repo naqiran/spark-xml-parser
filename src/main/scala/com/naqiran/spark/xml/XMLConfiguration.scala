@@ -13,6 +13,7 @@ private[xml] class XMLConfiguration(@transient private val configuration: Map[St
   val recordElementName = configuration.getOrDefault(XMLConfiguration.XmlRecordElementName, XMLConfiguration.DefaultRecordElementName)
   val rootElementName = configuration.getOrDefault(XMLConfiguration.XmlRootElementName, XMLConfiguration.DefaultRootElementName)
   val pathString = configuration.getOrDefault("path", "")
+
   def getAttributeNameWithoutPrefix(attributeName: String): String = {
     attributeName.replace(attributeNodePrefix, "")
   }

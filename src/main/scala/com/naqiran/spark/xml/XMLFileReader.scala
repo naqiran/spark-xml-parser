@@ -3,7 +3,7 @@ package com.naqiran.spark.xml
 import java.io.InputStream
 import java.util.{Arrays, List}
 
-import javax.xml.stream.events.StartElement
+import javax.xml.stream.events.{Attribute, Characters, EndElement, StartElement}
 import javax.xml.stream.{XMLEventFactory, XMLEventReader, XMLInputFactory}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
@@ -13,7 +13,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecificInternalRow
 import org.apache.spark.sql.sources.v2.DataSourceOptions
 import org.apache.spark.sql.sources.v2.reader.{DataSourceReader, InputPartition, InputPartitionReader}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{DataType, DataTypes, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 
 
@@ -35,7 +35,7 @@ private[xml] class XMLPartition(configuration: XMLConfiguration, schema : Struct
 case class XMLPartitionReader(configuration: XMLConfiguration, schema : StructType) extends InputPartitionReader[InternalRow] with Logging {
 
   val fileStream = createFileStream
-  val xmlWriter  = createXMLReader()
+  val xmlReader  = createXMLReader()
   val eventFactory = XMLEventFactory.newInstance()
   var rootIdentified = false
   var currentElement : StartElement = null
@@ -48,13 +48,12 @@ case class XMLPartitionReader(configuration: XMLConfiguration, schema : StructTy
     } else {
       currentElement = getNextElement(configuration.recordElementName)
     }
-    log.info("Dont know" + currentElement)
     currentElement != null
   }
 
   def getNextElement(elementName : String) : StartElement = {
-    while (xmlWriter.hasNext()) {
-      xmlWriter.nextEvent() match {
+    while (xmlReader.hasNext()) {
+      xmlReader.nextEvent() match {
         case startElement: StartElement =>
           if (startElement.getName.getLocalPart.equals(elementName)) {
             return startElement
@@ -62,14 +61,54 @@ case class XMLPartitionReader(configuration: XMLConfiguration, schema : StructTy
         case _ =>
       }
     }
-    log.info("Somehow got here:" + elementName)
     null
   }
 
   override def get(): InternalRow = {
-    val row = new SpecificInternalRow(schema)
-    row.update(0, UTF8String.fromString(currentElement.getName().getLocalPart))
+    getElement(currentElement, schema)
+  }
+
+  def getFieldMap(schema : StructType) : Map[String, DataType] = {
+    schema.fields.map(field => field.name -> field.dataType).toMap
+  }
+
+  def getElement(element : StartElement, elementSchema : StructType): InternalRow = {
+    val row = new SpecificInternalRow(elementSchema)
+    element.getAttributes.forEachRemaining(attr => {
+      val attribute = attr.asInstanceOf[Attribute]
+      updateRow(row, configuration.getAttributeName(attribute.getName.getLocalPart), elementSchema, attribute.getValue)
+    })
+    var reachedEndElement = true
+    var currentElementName = element.getName.getLocalPart
+    while(xmlReader.hasNext && reachedEndElement) {
+      xmlReader.nextEvent() match {
+        case startElement: StartElement => {
+          currentElementName = startElement.getName.getLocalPart
+          val elementIndex = elementSchema.names.indexOf(startElement.getName.getLocalPart)
+          if (elementIndex >= 0){
+            val structField = schema.apply(elementIndex)
+            if (structField.dataType.typeName.equals("struct")) {
+              row.update(elementIndex, getElement(startElement,structField.dataType.asInstanceOf[StructType]))
+            }
+          }
+        }
+        case endElement: EndElement => if (element.getName.getLocalPart.equals(endElement.getName.getLocalPart)) {
+          reachedEndElement = false
+        }
+        case character: Characters => updateRow(row, currentElementName, elementSchema, character.getData)
+      }
+    }
     row
+  }
+
+  def updateRow(row : InternalRow, elementName : String, elementSchema : StructType, value : String) : Unit = {
+    val fieldIndex = elementSchema.names.indexOf(elementName)
+    if (fieldIndex >= 0) {
+      elementSchema.apply(elementName).dataType match {
+        case DataTypes.StringType => row.update(fieldIndex, UTF8String.fromString(value))
+        case _ =>
+      }
+    }
   }
 
   override def close(): Unit = {
